@@ -1,0 +1,255 @@
+---
+title: "Traffic Collisions, City of Kitchener (Ontario)"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+
+<style>
+.fdashboard-header-right {
+  position: absolute;
+  right: 20px;
+  top: 12px;
+  font-size: 14px;
+  color: #ffffff;
+  opacity: 0.9;
+  z-index: 1000;
+}
+</style>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  var header = document.querySelector(".navbar");
+  if (header) {
+    var div = document.createElement("div");
+    div.className = "fdashboard-header-right";
+    div.innerHTML = "Updated: `r format(Sys.Date(), '%B %d, %Y')`";
+    header.appendChild(div);
+  }
+});
+</script>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(flexdashboard)
+library(sf)
+library(dplyr)
+library(lubridate)
+library(leaflet)
+library(DT)
+library(ggplot2)
+library(scales)
+library(htmltools)
+library(viridis)
+```
+
+```{r data, include=FALSE}
+URL_COLLISIONS <- "https://services1.arcgis.com/qAo1OsXi67t7XgmS/arcgis/rest/services/Traffic_Collisions/FeatureServer/0/query"
+URL_WARDS      <- "https://services1.arcgis.com/qAo1OsXi67t7XgmS/arcgis/rest/services/Wards/FeatureServer/0/query"
+
+arcgis_read_sf <- function(url, chunk = 2000) {
+  out <- list(); offset <- 0
+  repeat {
+    q <- paste0(
+      url,
+      "?where=1=1&outFields=*&outSR=4326&f=geojson",
+      "&resultOffset=", offset,
+      "&resultRecordCount=", chunk
+    )
+    x <- try(read_sf(q, quiet = TRUE), silent = TRUE)
+    if (inherits(x, "try-error") || nrow(x) == 0) break
+    out[[length(out) + 1]] <- x
+    if (nrow(x) < chunk) break
+    offset <- offset + chunk
+  }
+  bind_rows(out) |> st_as_sf(crs = 4326)
+}
+
+coll_raw <- arcgis_read_sf(URL_COLLISIONS)
+wards    <- arcgis_read_sf(URL_WARDS)
+
+coll_raw$collision_dt <- as.POSIXct(
+  coll_raw$ACCIDENTDATE / 1000,
+  origin = "1970-01-01",
+  tz = "America/Toronto"
+)
+
+coll_raw$year  <- year(coll_raw$collision_dt)
+coll_raw$month <- floor_date(coll_raw$collision_dt, "month")
+
+wards$WARD <- as.numeric(wards[[1]])
+
+coll <- st_join(coll_raw, wards["WARD"], left = TRUE)
+
+monthly_ts <- coll |> st_drop_geometry() |> count(month)
+
+ward_lookup <- tibble::tibble(
+  WARD     = c(658, 657, 654, 659, 655, 652, 660, 653, 651, 656),
+  WARD_NUM = 1:10
+)
+
+ward_summary <- coll |>
+  st_drop_geometry() |>
+  filter(!is.na(WARD)) |>
+  count(WARD, name = "n") |>
+  left_join(ward_lookup, by = "WARD") |>
+  arrange(WARD_NUM) |>
+  mutate(WARD_LABEL = paste("Ward", WARD_NUM))
+
+wards <- wards |>
+  left_join(ward_summary |> select(WARD, n, WARD_NUM, WARD_LABEL), by = "WARD")
+
+pal_year <- colorFactor("viridis", domain = coll$year)
+
+pal_ward <- colorFactor(
+  palette = viridis(10),
+  domain  = 1:10
+)
+```
+
+Column {data-width=250}
+-------------------------------------
+
+### Project Objective
+- Identify spatial patterns of traffic collisions across Kitchener  
+- Examine temporal trends in collision frequency  
+- Highlight high-collision wards and seasonal variation  
+- Support safer street design and data-driven planning  
+
+### Primary Stakeholders
+- City transportation planners  
+- Traffic engineers  
+- Municipal decision-makers  
+- Residents and community groups  
+
+### Data Sources
+- **Traffic Collision Data**  
+  City of Kitchener Open Data Portal (via ArcGIS REST services)
+
+- **Ward Boundaries**  
+  City of Kitchener Municipal Wards dataset
+
+- **Basemap**  
+  OpenStreetMap contributors, CARTO
+
+- **Software & Libraries**  
+  R, flexdashboard, leaflet, sf, ggplot2
+
+Column {data-width=650}
+-------------------------------------
+
+### Map
+
+```{r}
+leaflet() |>
+  addTiles(
+    attribution = "© OpenStreetMap contributors | © CARTO | Analysis by Gazi Afroz",
+    group = "Road map"
+  ) |>
+  addProviderTiles("CartoDB.Positron", group = "Light map") |>
+  addPolygons(
+    data = wards,
+    fillColor = ~pal_ward(WARD_NUM),
+    fillOpacity = 0.6,
+    color = "#333333",
+    weight = 1,
+    label = ~WARD_LABEL,
+    popup = ~paste0(
+      "<b>", WARD_LABEL, "</b><br>",
+      "<b>Total collisions:</b> ", n
+    ),
+    group = "Wards"
+  ) |>
+  addCircleMarkers(
+    data = coll,
+    radius = 3,
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    color = ~pal_year(year),
+    popup = ~paste0(
+      "<b>Date:</b> ", as.Date(collision_dt), "<br>",
+      "<b>Year:</b> ", year, "<br>",
+      "<b>Ward:</b> ", paste("Ward", ward_lookup$WARD_NUM[match(WARD, ward_lookup$WARD)])
+    ),
+    group = "Collisions"
+  ) |>
+  addLayersControl(
+    baseGroups = c("Road map", "Light map"),
+    overlayGroups = c("Wards", "Collisions"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) |>
+  addLegend(
+    "bottomright",
+    pal = pal_year,
+    values = coll$year,
+    title = "Collision Year"
+  ) |>
+  addLegend(
+    "bottomleft",
+    pal    = pal_ward,
+    values = 1:10,
+    labels = paste("Ward", 1:10),
+    title  = "Ward"
+  ) |>
+  setView(lng = -80.49, lat = 43.45, zoom = 12)
+```
+
+Column {.tabset data-width=350}
+-------------------------------------
+
+### Table
+
+```{r}
+datatable(
+  coll |>
+    st_drop_geometry() |>
+    left_join(ward_lookup, by = "WARD") |>
+    mutate(Ward = paste("Ward", WARD_NUM)) |>
+    select(collision_dt, year, Ward),
+  rownames = FALSE,
+  options = list(pageLength = 10)
+)
+```
+
+### Time Series
+
+```{r}
+ggplot(monthly_ts, aes(month, n)) +
+  geom_line(color = "#08519c") +
+  geom_point(size = 1) +
+  labs(x = "Month", y = "Number of collisions") +
+  theme_minimal()
+```
+
+### Collisions by Ward
+
+```{r}
+ggplot(
+  ward_summary,
+  aes(x = reorder(WARD_LABEL, n), y = n)
+) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(x = "Ward", y = "Total collisions") +
+  theme_minimal()
+```
+
+### Interpretation
+
+**Map**  
+The interactive map reveals clear spatial clustering of traffic collisions across the City of Kitchener. Higher collision densities are concentrated in central and eastern wards, particularly along major arterial roads and near commercial corridors. The overlay of collision points by year shows that while collisions occur citywide, certain wards consistently experience higher activity, indicating persistent spatial risk rather than isolated events.
+
+**Table**  
+The table provides a detailed record-level view of individual collisions, allowing users to examine the timing and ward location of each incident. This view supports targeted inspection of specific years or wards and helps validate broader spatial and temporal patterns observed in the map and summary charts.
+
+**Time Series**  
+The time series highlights temporal trends in collision frequency, showing fluctuations across months and years. Seasonal patterns are evident, with higher collision counts typically occurring during late fall and winter months, likely reflecting weather conditions, reduced visibility, and increased traffic volumes.
+
+**Collisions by Ward**  
+The bar chart summarizes total collisions by ward and clearly distinguishes high- and low-collision areas. Central wards exhibit the highest totals, reinforcing patterns seen on the map. This comparison supports prioritizing safety interventions, enforcement, and infrastructure improvements in wards with consistently elevated collision counts.
+
+Together, these components provide a comprehensive spatial and temporal understanding of traffic collisions in Kitchener and offer practical insights to support data-driven transportation safety planning.
